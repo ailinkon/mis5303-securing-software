@@ -1,7 +1,8 @@
-# ---- Virtual environment (NEVER commit - hundreds of MB) ----
+# ---- Virtual environments (NEVER commit) ----
 venv/
 env/
 .venv/
+*/venv/
 
 # ---- Python ----
 __pycache__/
@@ -10,20 +11,19 @@ __pycache__/
 .Python
 
 # ---- Application runtime data ----
-app.db
+*.db
 *.sqlite
 *.sqlite3
 uploads/
-!uploads/.gitkeep
+!**/uploads/.gitkeep
 
 # ---- Secrets ----
 .env
 *.pem
 *.key
-secrets.txt
 
 # ---- Backups / scratch ----
-app_old.py
+*_old.py
 *.bak
 *.tmp
 
