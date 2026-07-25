@@ -1,20 +1,21 @@
 """
-MIS5303 Lab 2 - Input Validation, SQL Injection, XSS, and Secure Data Flow.
+MIS5303 Lab 1 - HARDENED version of the lab application.
 
-Starting from the deliberately insecure Lab 1 app. This Lab 2 copy fixes
-ONLY the input-flow vulnerabilities in scope for this lab:
-  - SQL injection in the notes query
-  - Stored XSS in the notes list
-  - Missing input validation on notes
-Other planted flaws (passwords, cookies, access control, upload, etc.) are
-left untouched - they belong to other labs.
+This is the remediated counterpart to app.py. Each change is marked
+FIXED with the Bandit ID it addresses, so the two files can be diffed
+to show the before/after for the lab writeup. Still intended for local
+educational use only.
 """
 
 import os
-import secrets
+import re
 import hashlib
+import secrets
+import shutil
 import sqlite3
 import subprocess
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 from flask import (
     Flask,
     request,
@@ -26,18 +27,26 @@ from flask import (
 
 app = Flask(__name__)
 
-# [VULN] Hardcoded/auto secret key (Lab 1 scope - left as-is).
+# FIXED (B105): key loaded from the environment, random fallback for dev.
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
-# [VULN] Insecure session cookie config (Lab 3 scope - left as-is).
-app.config["SESSION_COOKIE_HTTPONLY"] = False
-app.config["SESSION_COOKIE_SECURE"] = False
+# FIXED: protective session cookie flags enabled.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 DATABASE = "app.db"
 UPLOAD_DIR = "uploads"
+ALLOWED_EXTENSIONS = {".txt", ".png", ".jpg", ".jpeg", ".pdf"}
+HOST_RE = re.compile(r"^[A-Za-z0-9.\-]{1,253}$")
 
-# FIXED (Lab 2): simple input-validation limit for notes.
-MAX_NOTE_LENGTH = 500
+
+def hash_password(password):
+    return generate_password_hash(password)
+
+
+def verify_password(password, stored):
+    return check_password_hash(stored, password)
 
 
 def get_db():
@@ -82,7 +91,6 @@ PAGE = """
   <ul>
     {% for n in notes %}<li>{{ n['content'] }}</li>{% endfor %}
   </ul>
-  {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
   <h2>Upload a File</h2>
   <form method="post" action="/upload" enctype="multipart/form-data">
     <input type="file" name="file">
@@ -116,17 +124,14 @@ AUTH_PAGE = """
 @app.route("/")
 def index():
     notes = []
-    error = request.args.get("error", "")
     if session.get("username"):
         conn = get_db()
-        # FIXED (Lab 2): parameterised query - username is passed as a bound
-        # parameter, so it can never break out of the SQL and inject logic.
+        # FIXED (B608): parameterised query.
         notes = conn.execute(
-            "SELECT * FROM notes WHERE username = ?",
-            (session["username"],),
+            "SELECT * FROM notes WHERE username = ?", (session["username"],)
         ).fetchall()
         conn.close()
-    return render_template_string(PAGE, notes=notes, ping_output="", error=error)
+    return render_template_string(PAGE, notes=notes, ping_output="")
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -137,10 +142,10 @@ def register():
         password = request.form["password"]
         conn = get_db()
         try:
-            # [VULN] Password stored in PLAINTEXT (Lab 3 scope - left as-is).
+            # FIXED: password stored as a salted hash, never plaintext.
             conn.execute(
                 "INSERT INTO users (username, password) VALUES (?, ?)",
-                (username, password),
+                (username, hash_password(password)),
             )
             conn.commit()
         except sqlite3.IntegrityError:
@@ -158,13 +163,12 @@ def login():
         username = request.form["username"]
         password = request.form["password"]
         conn = get_db()
-        # Parameterised query (already safe in Lab 1 for login).
+        # FIXED (B608): parameterised query; password verified via hash.
         user = conn.execute(
-            "SELECT * FROM users WHERE username = ? AND password = ?",
-            (username, password),
+            "SELECT * FROM users WHERE username = ?", (username,)
         ).fetchone()
         conn.close()
-        if user:
+        if user and verify_password(password, user["password"]):
             session["username"] = user["username"]
             return redirect(url_for("index"))
         error = "Invalid credentials"
@@ -182,12 +186,6 @@ def add_note():
     if not session.get("username"):
         return redirect(url_for("login"))
     content = request.form["content"]
-    # FIXED (Lab 2): input validation - reject empty or over-long notes
-    # before they ever reach the database.
-    if not content or not content.strip():
-        return redirect(url_for("index", error="Note cannot be empty."))
-    if len(content) > MAX_NOTE_LENGTH:
-        return redirect(url_for("index", error="Note is too long (max 500 characters)."))
     conn = get_db()
     conn.execute(
         "INSERT INTO notes (username, content) VALUES (?, ?)",
@@ -203,27 +201,45 @@ def upload():
     if not session.get("username"):
         return redirect(url_for("login"))
     f = request.files["file"]
-    # [VULN] Unrestricted upload (Lab 4 scope - left as-is).
-    path = os.path.join(UPLOAD_DIR, f.filename)
+    # FIXED: filename sanitised and extension checked against an allow-list.
+    filename = secure_filename(f.filename or "")
+    ext = os.path.splitext(filename)[1].lower()
+    if not filename or ext not in ALLOWED_EXTENSIONS:
+        return "File type not allowed. <a href='/'>Back</a>", 400
+    path = os.path.join(UPLOAD_DIR, filename)
     f.save(path)
-    # [VULN] Weak hash function MD5 (Lab 1/5 scope - left as-is).
-    digest = hashlib.md5(open(path, "rb").read()).hexdigest()
-    return f"Uploaded {f.filename} (md5={digest}). <a href='/'>Back</a>"
+    # FIXED (B324): SHA-256 replaces MD5 for the integrity digest.
+    with open(path, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    return f"Uploaded {filename} (sha256={digest}). <a href='/'>Back</a>"
 
 
 @app.route("/admin/ping", methods=["POST"])
 def ping():
     host = request.form["host"]
-    # [VULN] Command injection (Lab 4 scope - left as-is).
+    # FIXED (B602): input validated, args passed as a list, no shell.
+    if not HOST_RE.match(host):
+        return render_template_string(
+            PAGE, notes=[], ping_output="Invalid host format."
+        )
+    ping_bin = shutil.which("ping")
+    if not ping_bin:
+        return render_template_string(
+            PAGE, notes=[], ping_output="ping unavailable."
+        )
     result = subprocess.run(
-        "ping -n 1 " + host, shell=True, capture_output=True, text=True
+        [ping_bin, "-n", "1", host],
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return render_template_string(
-        PAGE, notes=[], ping_output=result.stdout + result.stderr, error=""
+        PAGE, notes=[], ping_output=result.stdout + result.stderr
     )
 
 
 if __name__ == "__main__":
     init_db()
-    # [VULN] Debug mode enabled (Lab 1 scope - left as-is).
-    app.run(debug=True)
+    # FIXED (B201): debugger disabled; use a WSGI server in production.
+    app.run(debug=False)
