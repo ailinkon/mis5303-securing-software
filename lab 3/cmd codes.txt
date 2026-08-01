@@ -1,0 +1,20 @@
+before:
+1. python app.py
+2. Open your browser and go to: http://127.0.0.1:5000/register
+3. Register two users (register the first, it sends you to login, then go back to /register for the second):
+User 1 — username: alice password: alicepw123
+User 2 — username: bob password: bobpw456
+4. python -c "import sqlite3; [print('id=%s username=%s password=%s' % r) for r in sqlite3.connect('app.db').execute('SELECT id, username, password FROM users')]"
+5. Check: inspect > application > cookies > http://127.0.0.1:5000. > https, security, SameSite
+
+after:
+1. del app.db
+2. python app_fixed.py
+3. In the browser, go to http://127.0.0.1:5000/register and register:
+username: alice password: alicepw123
+(same details as before — but this time the fixed app will hash it)
+4. Go to your second terminal (in the lab3 folder) and run the same database command as before:
+python -c "import sqlite3; [print('id=%s username=%s password=%s' % r) for r in sqlite3.connect('app.db').execute('SELECT id, username, password FROM users')]"
+5. In the browser, log in at http://127.0.0.1:5000/login as alice / alicepw123.
+→ It should log you in successfully — this also proves bcrypt verification works (the hash was checked correctly).
+6. Check: inspect > application > cookies > http://127.0.0.1:5000. > https✅, security, SameSite (Lax)
